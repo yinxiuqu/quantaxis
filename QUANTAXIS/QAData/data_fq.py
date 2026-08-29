@@ -114,8 +114,11 @@ def _QA_data_stock_to_fq(bfq_data, xdxr_data, fqtype):
             axis=1
         )
 
-        data['if_trade'].fillna(value=0, inplace=True)
-        data = data.fillna(method='ffill')
+        # data['if_trade'].fillna(value=0, inplace=True)
+        # data = data.fillna(method='ffill')
+
+        data['if_trade'] = data['if_trade'].fillna(0)
+        data = data.ffill()
 
         data = pd.concat(
             [
@@ -160,7 +163,7 @@ def _QA_data_stock_to_fq(bfq_data, xdxr_data, fqtype):
     # data['volume'] = data['volume'] / \
     #     data['adj'] if 'volume' in data.columns else data['vol']/data['adj']
 
-    data['volume'] = data['volume']  if 'volume' in data.columns else data['vol']
+    data['volume'] = data['volume'] if 'volume' in data.columns else data['vol']
     try:
         data['high_limit'] = data['high_limit'] * data['adj']
         data['low_limit'] = data['low_limit'] * data['adj']

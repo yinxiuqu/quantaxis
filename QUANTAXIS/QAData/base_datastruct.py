@@ -80,7 +80,9 @@ class _quotation_base():
         # print(DataFrame)
         # 🛠todo 判断DataFame 对象字段的合法性，是否正确
         self.data = DataFrame.drop_duplicates().sort_index()
-        self.data.index = self.data.index.remove_unused_levels()
+        # pandas 2.x 兼容: remove_unused_levels 仅对 MultiIndex 有效
+        if isinstance(self.data.index, pd.MultiIndex):
+            self.data.index = self.data.index.remove_unused_levels()
         # 🛠todo 该变量没有用到， 是不是 self.type = marketdata_type ??
 
         # 数据类型 可能的取值
@@ -652,7 +654,10 @@ class _quotation_base():
     @lru_cache()
     def index(self):
         '返回结构体的索引'
-        return self.data.index.remove_unused_levels()
+        # pandas 2.x 兼容: remove_unused_levels 仅对 MultiIndex 有效
+        if isinstance(self.data.index, pd.MultiIndex):
+            return self.data.index.remove_unused_levels()
+        return self.data.index
 
     @property
     @lru_cache()
