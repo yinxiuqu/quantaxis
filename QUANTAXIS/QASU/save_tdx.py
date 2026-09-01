@@ -1955,16 +1955,36 @@ def QA_SU_save_stock_block(client=DATABASE, ui_log=None, ui_progress=None):
         #     ui_progress_int_value=8000
         # )
 
-        # tushare 的板块数据有中证500成分，增加获取中证500成分 ——阿财
-        coll.insert_many(
-            QA_util_to_json_from_pandas(QA_fetch_get_stock_block('tushare'))
-        )
-        QA_util_log_info(
-            'tushare Block ====',
-            ui_log=ui_log,
-            ui_progress=ui_progress,
-            ui_progress_int_value=9000
-        )
+        # 中证500成分（迁移修复 2026-09-01）：
+        # 原实现用 tushare 老接口 ts.get_zz500s()（抓中证官网 Excel，已失效），
+        # 改为 baostock 免费接口 query_zz500_stocks()，无需 token/积分。
+        try:
+            import baostock as bs
+            lg = bs.login()
+            if lg.error_code == '0':
+                rs = bs.query_zz500_stocks()
+                if rs.error_code == '0':
+                    df = rs.get_data()
+                    df['code'] = df['code'].str[3:]   # sh.600004 -> 600004
+                    df['blockname'] = '中证500'
+                    df['type'] = 'csindex'
+                    df['source'] = 'baostock'
+                    coll.insert_many(
+                        QA_util_to_json_from_pandas(
+                            df[['code', 'blockname', 'type', 'source']])
+                    )
+                bs.logout()
+            QA_util_log_info(
+                'baostock Block ====',
+                ui_log=ui_log,
+                ui_progress=ui_progress,
+                ui_progress_int_value=9000
+            )
+        except Exception as e:
+            QA_util_log_info(
+                'baostock 中证500获取失败: %s' % e,
+                ui_log=ui_log
+            )
 
         QA_util_log_info(
             '完成股票板块获取=',
