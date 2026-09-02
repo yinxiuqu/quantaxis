@@ -69,17 +69,12 @@ def ping(ip, port=7709, type_='stock'):
     __time1 = datetime.datetime.now()
     try:
         if type_ in ['stock']:
-            with api.connect(ip, port, time_out=0.7):
-                res = api.get_security_list(0, 1)
-
-                if res is not None:
-                    if len(api.get_security_list(0, 1)) > 800:
-                        return datetime.datetime.now() - __time1
-                    else:
-                        print('BAD RESPONSE {}'.format(ip))
-                        return datetime.timedelta(9, 9, 0)
+            with api.connect(ip, port, time_out=1.0):
+                # 2026-09-02 升级: 真实拉K线验证 (半残服务器能数证券但拉不到K线)
+                bars = api.get_security_bars(9, 0, '000001', 0, 1)
+                if bars is not None and len(bars) > 0:
+                    return datetime.datetime.now() - __time1
                 else:
-
                     print('BAD RESPONSE {}'.format(ip))
                     return datetime.timedelta(9, 9, 0)
         elif type_ in ['future']:
