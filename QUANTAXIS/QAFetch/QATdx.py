@@ -348,6 +348,7 @@ def QA_fetch_get_security_bars(code, _type, lens, ip=None, port=None):
 
 
 @retry(stop_max_attempt_number=3, wait_random_min=50, wait_random_max=100)
+@retry(stop_max_attempt_number=3, wait_random_min=50, wait_random_max=100)
 def QA_fetch_get_stock_day(code, start_date, end_date, if_fq='00',
                            frequence='day', ip=None, port=None):
     """获取日线及以上级别的数据
