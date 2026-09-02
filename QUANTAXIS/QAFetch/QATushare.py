@@ -84,7 +84,7 @@ def QA_fetch_get_stock_adj(code, end=''):
 
 def QA_fetch_stock_basic():
 
-    def fetch_stock_basic():
+    def fetch_stock_basic(retry=0):
         stock_basic = None
         try:
             pro = get_pro()
@@ -99,8 +99,11 @@ def QA_fetch_stock_basic():
         except Exception as e:
             print(e)
             print('except when fetch stock basic')
-            time.sleep(1)
-            stock_basic = fetch_stock_basic()
+            if retry < 3:  # 2026-09-02: 限制递归次数, 防限频时无限重试
+                time.sleep(5)
+                stock_basic = fetch_stock_basic(retry + 1)
+            else:
+                print('stock_basic 重试 3 次仍失败(可能积分/限频), 放弃')
         return stock_basic
 
     return fetch_stock_basic()
@@ -172,23 +175,44 @@ def QA_fetch_get_stock_day(name, start='', end='', if_fq='qfq', type_='pd'):
 
 
 def QA_fetch_get_stock_realtime():
-    data = ts.get_today_all()
+    # 2026-09-02: 老接口 ts.get_today_all 已停用, 改用 pro.daily(trade_date=最新交易日)
+    # 全市场当日快照(收盘后数据)。返回 json。
+    pro = get_pro()
+    if pro is None:
+        return []
+    today = datetime.date.today()
+    data = None
+    for back in range(10):  # 向前找最近交易日(节假日/盘中)
+        day = (today - datetime.timedelta(days=back)).strftime('%Y%m%d')
+        try:
+            data = pro.daily(trade_date=day)
+        except Exception:
+            data = None
+        if data is not None and len(data):
+            break
+        time.sleep(0.3)
+    if data is None or len(data) == 0:
+        return []
     data_json = QA_util_to_json_from_pandas(data)
     return data_json
 
 
 def QA_fetch_get_stock_info(name):
-    data = ts.get_stock_basics()
+    # 2026-09-02: 老接口 ts.get_stock_basics 已停用, 改用 pro.stock_basic
+    df = QA_fetch_stock_basic()
+    if df is None or len(df) == 0:
+        return None
     try:
-        return data if name == '' else data.loc[name]
-    except:
+        return df if name == '' else df[df['ts_code'] == name].iloc[0]
+    except Exception:
         return None
 
 
 def QA_fetch_get_stock_tick(name, date):
-    if (len(name) != 6):
-        name = str(name)[0:6]
-    return ts.get_tick_data(name, date)
+    # 2026-09-02: 老接口 ts.get_tick_data 已停用, tushare pro 无免费分笔
+    raise NotImplementedError(
+        'tushare pro 无免费分笔成交(tick)接口; '
+        '如需 tick 请用 tdx 数据源 QA_fetch_get_stock_tick')
 
 
 def QA_fetch_get_stock_list():
@@ -197,20 +221,44 @@ def QA_fetch_get_stock_list():
 
 
 def QA_fetch_get_stock_time_to_market():
-    data = ts.get_stock_basics()
-    return data[data['timeToMarket'] != 0]['timeToMarket']\
-        .apply(lambda x: QA_util_date_int2str(x))
+    # 2026-09-02: 老接口 ts.get_stock_basics 已停用;
+    # pro stock_basic 无 timeToMarket 字段, 用 list_date(上市日期)替代
+    df = QA_fetch_stock_basic()
+    if df is None or len(df) == 0:
+        return pd.Series()
+    s = df.set_index('ts_code')['list_date'].dropna()
+    return s.apply(lambda x: QA_util_date_int2str(int(str(x)[0:8])))
 
 
 def QA_fetch_get_trade_date(end, exchange):
-    data = ts.trade_cal()
-    da = data[data.isOpen > 0]
+    # 2026-09-02: 老接口 ts.trade_cal 已停用, 改用 pro.trade_cal
+    pro = get_pro()
+    if pro is None:
+        return []
+    end = str(end).replace('-', '')[0:8]
+    start_year = int(end[0:4])
+    parts = []
+    for year in range(1990, start_year + 1):
+        try:
+            p = pro.trade_cal(exchange=exchange,
+                              start_date='%d0101' % year,
+                              end_date='%d1231' % year if year < start_year else end)
+            if p is not None and len(p):
+                parts.append(p)
+        except Exception:
+            pass
+        time.sleep(0.3)
+    if not parts:
+        return []
+    data = pd.concat(parts, ignore_index=True)
+    data = data[data.is_open > 0]
     data_json = QA_util_to_json_from_pandas(data)
     message = []
-    for i in range(0, len(data_json) - 1, 1):
-        date = data_json[i]['calendarDate']
+    for i in range(0, len(data_json), 1):
+        date = data_json[i]['cal_date']
+        date = QA_util_date_int2str(int(str(date)[0:8]))
         num = i + 1
-        exchangeName = 'SSE'
+        exchangeName = 'SSE' if exchange == 'SSE' else exchange
         data_stamp = QA_util_date_stamp(date)
         mes = {
             'date': date,
@@ -223,29 +271,26 @@ def QA_fetch_get_trade_date(end, exchange):
 
 
 def QA_fetch_get_lhb(date):
-    return ts.top_list(date)
+    # 2026-09-02: 老接口 ts.top_list 已停用, 改用 pro.top_list(需相应积分权限)
+    pro = get_pro()
+    if pro is None:
+        return pd.DataFrame()
+    return pro.top_list(trade_date=str(date).replace('-', '')[0:8])
 
 
 def QA_fetch_get_stock_money():
+    # 湘财等源有 moneyflow; 标准 tushare pro 资金流接口需高积分, 保持空实现
     pass
 
 
 def QA_fetch_get_stock_block():
-    """Tushare的版块数据
-    
-    Returns:
-        [type] -- [description]
+    """版块数据 —— 老接口 ts.get_zz500s 已失效, tushare pro 无免费成分接口
+
+    中证500成分请改用 baostock: QUANTAXIS.QAFetch.QABaostock
     """
-    import tushare as ts
-    csindex500 = ts.get_zz500s()
-    try:
-        csindex500['blockname'] = '中证500'
-        csindex500['source'] = 'tushare'
-        csindex500['type'] = 'csindex'
-        csindex500 = csindex500.drop(['date', 'name', 'weight'], axis=1)
-        return csindex500.set_index('code', drop=False)
-    except:
-        return None
+    raise NotImplementedError(
+        'tushare pro 无免费成分/板块接口(原 get_zz500s 已失效); '
+        '中证500成分可用 baostock query_zz500_stocks()')
 
 # test
 
