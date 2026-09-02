@@ -114,12 +114,33 @@ class QAFeatureAnalysis():
     def create_tear_sheet(self):
         return create_full_tear_sheet(self.factor_and_forward_returns)
 
+    @staticmethod
+    def _normalize_index(s):
+        """规整为 (date, code) 双索引, 日期层转 Timestamp (兼容 mongo/ClickHouse 数据源)"""
+        if s.index.nlevels == 3:
+            # groupby(level=1).apply 产生 (code, date, code) 三层
+            s.index = s.index.droplevel(2)
+        if s.index.nlevels == 2:
+            try:
+                pd.to_datetime(s.index.get_level_values(0)[0])
+            except Exception:
+                s.index = s.index.swaplevel(0, 1)
+        s.index = s.index.set_levels(pd.to_datetime(s.index.levels[0]), level=0)
+        return s
+
     @property
     @lru_cache()
     def concatRes(self):
-        res = pd.concat([self.feature, self.returns, ], axis=1)
-
-        res = pd.concat([res, self.get_industry().set_index(['date','order_book_id']).first_industry_name], axis=1)
+        feature = self._normalize_index(self.feature.copy())
+        returns = self._normalize_index(self.returns.copy())
+        res = pd.concat([feature, returns], axis=1)
+        try:
+            # 行业数据可选: ClickHouse 无 citis_industry 时跳过, 不影响 IC/IR
+            industry = self.get_industry().set_index(
+                ['date', 'order_book_id']).first_industry_name
+            res = pd.concat([res, industry], axis=1)
+        except Exception:
+            pass
         return res
 
     @property

@@ -29,7 +29,7 @@ class QAFeatureView():
         if len(res) > 0:
 
             res.columns = ['date', 'code', factorname]
-            res.assign(date=pd.to_datetime(res.date))
+            res['date'] = pd.to_datetime(res['date'])  # 修复: assign 需赋值回, 否则日期是字符串
             return res.set_index(['date', 'code']).sort_index()
         else:
             return pd.DataFrame([])
