@@ -60,6 +60,7 @@ from QUANTAXIS.QAFetch.base import get_stock_market
 from QUANTAXIS.QAFetch import QAQAWEB as QAWEB
 from QUANTAXIS.QAFetch import QAKQ as QAKQ
 from QUANTAXIS.QAFetch import QABaostock as QABaostock
+from QUANTAXIS.QAFetch import QA_xcsc_tushare as QAxcsc_tushare
 
 
 def use(package):
@@ -70,6 +71,8 @@ def use(package):
         return QATdx
     elif package in ["baostock", "bs", "bao"]:
         return QABaostock
+    elif package in ["xcsc", "xcsc_tushare", "xcts"]:
+        return QAxcsc_tushare
     elif package in ["ths", "THS"]:
         return QAThs
     elif package in ["HEXUN", "Hexun", "hexun"]:
@@ -84,7 +87,7 @@ def QA_fetch_get_stock_day(
     Engine = use(package)
     if package in ["ths", "THS", "wind"]:
         return Engine.QA_fetch_get_stock_day(code, start, end, if_fq)
-    elif package in ["ts", "tushare"]:
+    elif package in ["ts", "tushare", "xcsc", "xcsc_tushare"]:
         return Engine.QA_fetch_get_stock_day(code, start, end, if_fq, type_)
     elif package in ["baostock", "bs", "bao"]:
         return Engine.QA_fetch_get_stock_day(code, start, end, if_fq, type_)
