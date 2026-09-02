@@ -5,19 +5,21 @@
 # 提供与 TDX 版本尽量兼容的接口：
 # - QA_fetch_get_stock_day(code, start, end, if_fq='00', type_='pd')
 # - QA_fetch_get_stock_list()
+# - QA_fetch_get_stock_adj / QA_fetch_get_trade_date / QA_fetch_get_stock_industry
 #
 # ⚠️⚠️ 访问限制(官网"访问规则", 违反会被拉黑) ⚠️⚠️
 #   - 每日 API 请求 ≤ 5 万次, 超过后进入黑名单控制
 #   - 【严禁并发连接访问】—— 只允许串行调用! 不要用多线程/多进程/async 并发!
 #   - 首次被黑名单: 冻结 6 小时后自动解除;
 #     本年多次被限制: 限制时长 = 本年累计限制次数 × 6 小时
-#   - 建议: 进程内只 login 一次复用会话, 不要每个 fetch 都 login/logout;
-#           日线每只股票一次调用拉全历史最省预算(5000 只 ≈ 5000 次/轮);
+#   - 建议: 日线每只股票一次调用拉全历史最省预算(5000 只 ≈ 5000 次/轮);
 #           财务/分钟线接口按需限量, 不要全量批处理
 #
-
-from __future__ import division
-
+# ⚠️ 登录策略(2026-09-02): 每次 fetch 都 login/logout(短连接), 刻意不用会话复用!
+#   原因: 若复用长连接, 连接被本进程长期占用, 另一个程序(如同时在跑的下载)
+#   再来 login 会与服务器会话冲突, 可能被屏蔽/拉黑。
+#   每次用完即走, 并发窗口最小, 最安全。代价是每次多一次登录往返。
+#
 import time
 import datetime
 from typing import List
@@ -32,20 +34,12 @@ from QUANTAXIS.QAUtil import (
 )
 
 
-# 2026-09-02 会话复用: 模块级只 login 一次, 全进程复用(符合官网"禁并发/省请求"要求)
-_bs_logged_in = False
-
-
 def _bs_login() -> None:
-    """登录 baostock(会话复用: 已登录则直接返回), 失败时重试几次。"""
-    global _bs_logged_in
-    if _bs_logged_in:
-        return
+    """登录 baostock(每次 fetch 都重新登录), 失败时重试几次。"""
     last_err = None
     for i in range(3):
         lg = bs.login()
         if lg.error_code == "0":
-            _bs_logged_in = True
             return
         last_err = lg.error_msg
         QA_util_log_info(
@@ -56,29 +50,11 @@ def _bs_login() -> None:
 
 
 def _bs_logout() -> None:
-    """登出 baostock(显式调用/进程退出时)"""
-    global _bs_logged_in
+    """登出 baostock(每次 fetch 结束调用)"""
     try:
         bs.logout()
     except Exception:
         pass
-    finally:
-        _bs_logged_in = False
-
-
-def _bs_reconnect():
-    """连接异常时重连(如服务器超时断开), 返回是否成功"""
-    global _bs_logged_in
-    _bs_logout()
-    try:
-        _bs_login()
-        return True
-    except Exception:
-        return False
-
-
-import atexit
-atexit.register(_bs_logout)  # 进程退出时自动断开
 
 
 def _baostock_code(code: str) -> str:
@@ -121,11 +97,11 @@ def QA_fetch_get_stock_day(
     :param type_: 'pd' 返回 DataFrame, 'json' 返回 list[dict]
     """
     _bs_login()
-    bs_code = _baostock_code(code)
-    adjustflag = _map_if_fq_to_adjustflag(if_fq)
+    try:
+        bs_code = _baostock_code(code)
+        adjustflag = _map_if_fq_to_adjustflag(if_fq)
 
-    def _query():
-        return bs.query_history_k_data_plus(
+        rs = bs.query_history_k_data_plus(
             bs_code,
             "date,code,open,high,low,close,volume,amount",
             start_date=start,
@@ -133,40 +109,37 @@ def QA_fetch_get_stock_day(
             frequency="d",
             adjustflag=adjustflag,
         )
+        if rs.error_code != "0":
+            raise RuntimeError(f"baostock query error: {rs.error_msg}")
 
-    rs = _query()
-    if rs.error_code != "0":  # 断线等异常: 重连重试一次
-        _bs_reconnect()
-        rs = _query()
-    if rs.error_code != "0":
-        raise RuntimeError(f"baostock query error: {rs.error_msg}")
+        data_list: List[list] = []
+        while rs.next():
+            data_list.append(rs.get_row_data())
 
-    data_list: List[list] = []
-    while rs.next():
-        data_list.append(rs.get_row_data())
+        if not data_list:
+            return pd.DataFrame() if type_ in ["pd", "pandas"] else []
 
-    if not data_list:
-        return pd.DataFrame() if type_ in ["pd", "pandas"] else []
+        df = pd.DataFrame(data_list, columns=rs.fields)
 
-    df = pd.DataFrame(data_list, columns=rs.fields)
+        # 类型转换
+        for col in ["open", "high", "low", "close", "volume", "amount"]:
+            df[col] = df[col].astype(float)
 
-    # 类型转换
-    for col in ["open", "high", "low", "close", "volume", "amount"]:
-        df[col] = df[col].astype(float)
+        # 补充 QUANTAXIS 常用字段
+        df["code"] = df["code"].apply(lambda x: x.split(".")[-1])
+        df["date"] = df["date"].astype(str)
+        df["date_stamp"] = df["date"].apply(QA_util_date_stamp)
+        df["time_stamp"] = df["date"].apply(
+            lambda x: QA_util_time_stamp(f"{x} 00:00:00")
+        )
 
-    # 补充 QUANTAXIS 常用字段
-    df["code"] = df["code"].apply(lambda x: x.split(".")[-1])
-    df["date"] = df["date"].astype(str)
-    df["date_stamp"] = df["date"].apply(QA_util_date_stamp)
-    df["time_stamp"] = df["date"].apply(
-        lambda x: QA_util_time_stamp(f"{x} 00:00:00")
-    )
+        df = df.set_index("date", drop=False)
 
-    df = df.set_index("date", drop=False)
-
-    if type_ in ["pd", "pandas", "P"]:
-        return df
-    return df.to_dict("records")
+        if type_ in ["pd", "pandas", "P"]:
+            return df
+        return df.to_dict("records")
+    finally:
+        _bs_logout()
 
 
 def QA_fetch_get_stock_list():
@@ -177,133 +150,120 @@ def QA_fetch_get_stock_list():
     index: (code, sse)
     """
     _bs_login()
-    rs = bs.query_stock_basic()
-    if rs.error_code != "0":
-        _bs_reconnect()
+    try:
         rs = bs.query_stock_basic()
-    if rs.error_code != "0":
-        raise RuntimeError(f"baostock stock_basic error: {rs.error_msg}")
+        if rs.error_code != "0":
+            raise RuntimeError(f"baostock stock_basic error: {rs.error_msg}")
 
-    data_list: List[list] = []
-    while rs.next():
-        data_list.append(rs.get_row_data())
+        data_list: List[list] = []
+        while rs.next():
+            data_list.append(rs.get_row_data())
 
-    if not data_list:
-        return pd.DataFrame()
+        if not data_list:
+            return pd.DataFrame()
 
-    df = pd.DataFrame(data_list, columns=rs.fields)
-    # baostock: code 形如 sh.600000 / sz.000001
-    df["sse"] = df["code"].apply(lambda x: x.split(".")[0])
-    df["code"] = df["code"].apply(lambda x: x.split(".")[-1])
+        df = pd.DataFrame(data_list, columns=rs.fields)
+        # baostock: code 形如 sh.600000 / sz.000001
+        df["sse"] = df["code"].apply(lambda x: x.split(".")[0])
+        df["code"] = df["code"].apply(lambda x: x.split(".")[-1])
 
-    df["name"] = df["code_name"]
-    df["volunit"] = 100
-    df["decimal_point"] = 2
-    df["pre_close"] = 0.0
+        df["name"] = df["code_name"]
+        df["volunit"] = 100
+        df["decimal_point"] = 2
+        df["pre_close"] = 0.0
 
-    df = df[["code", "volunit", "decimal_point", "name", "pre_close", "sse"]]
-    df = df.drop_duplicates(["code", "sse"])
-    df = df.set_index(["code", "sse"], drop=False)
+        df = df[["code", "volunit", "decimal_point", "name", "pre_close", "sse"]]
+        df = df.drop_duplicates(["code", "sse"])
+        df = df.set_index(["code", "sse"], drop=False)
 
-    return df
+        return df
+    finally:
+        _bs_logout()
 
-
-
-# ============ 2026-09-02 新增: 高频函数(会话复用) ============
 
 def QA_fetch_get_stock_adj(code: str, start: str = "", end: str = ""):
     """复权因子(baostock query_adjust_factor, 除权日记录制)
 
     :param code: 6位代码, 如 '600000'
     :param start/end: 'YYYY-MM-DD', 缺省取全历史
-    :return: DataFrame(date, code, foreAdjustFactor, adjustFactor...)
+    :return: DataFrame(date, code, foreAdjustFactor, backAdjustFactor, adjustFactor)
     """
     _bs_login()
-    bs_code = _baostock_code(code)
-    if not start:
-        start = "1990-01-01"
-    if not end:
-        end = str(datetime.date.today())
+    try:
+        bs_code = _baostock_code(code)
+        if not start:
+            start = "1990-01-01"
+        if not end:
+            end = str(datetime.date.today())
 
-    def _query():
-        return bs.query_adjust_factor(code=bs_code, start_date=start,
-                                      end_date=end)
+        rs = bs.query_adjust_factor(code=bs_code, start_date=start,
+                                    end_date=end)
+        if rs.error_code != "0":
+            raise RuntimeError(f"baostock adjust_factor error: {rs.error_msg}")
 
-    rs = _query()
-    if rs.error_code != "0":
-        _bs_reconnect()
-        rs = _query()
-    if rs.error_code != "0":
-        raise RuntimeError(f"baostock adjust_factor error: {rs.error_msg}")
-
-    data_list: List[list] = []
-    while rs.next():
-        data_list.append(rs.get_row_data())
-    if not data_list:
-        return pd.DataFrame()
-    df = pd.DataFrame(data_list, columns=rs.fields)
-    df["code"] = df["code"].apply(lambda x: x.split(".")[-1])
-    # 除权日字段为 dividOperateDate, 统一到 date 列
-    df["date"] = df["dividOperateDate"].astype(str)
-    df = df.set_index("date", drop=False)
-    return df
+        data_list: List[list] = []
+        while rs.next():
+            data_list.append(rs.get_row_data())
+        if not data_list:
+            return pd.DataFrame()
+        df = pd.DataFrame(data_list, columns=rs.fields)
+        df["code"] = df["code"].apply(lambda x: x.split(".")[-1])
+        # 除权日字段为 dividOperateDate, 统一到 date 列
+        df["date"] = df["dividOperateDate"].astype(str)
+        df = df.set_index("date", drop=False)
+        return df
+    finally:
+        _bs_logout()
 
 
 def QA_fetch_get_trade_date(start: str = "1990-01-01", end: str = ""):
     """交易日历(baostock query_trade_dates)
 
-    :return: DataFrame(calendar_date, is_trading_day)
+    :return: DataFrame(calendar_date, is_trading_day, date)
     """
     _bs_login()
-    if not end:
-        end = str(datetime.date.today())
+    try:
+        if not end:
+            end = str(datetime.date.today())
+        rs = bs.query_trade_dates(start_date=start, end_date=end)
+        if rs.error_code != "0":
+            raise RuntimeError(f"baostock trade_date error: {rs.error_msg}")
 
-    def _query():
-        return bs.query_trade_dates(start_date=start, end_date=end)
-
-    rs = _query()
-    if rs.error_code != "0":
-        _bs_reconnect()
-        rs = _query()
-    if rs.error_code != "0":
-        raise RuntimeError(f"baostock trade_date error: {rs.error_msg}")
-
-    data_list: List[list] = []
-    while rs.next():
-        data_list.append(rs.get_row_data())
-    if not data_list:
-        return pd.DataFrame()
-    df = pd.DataFrame(data_list, columns=rs.fields)
-    df["date"] = df["calendar_date"].astype(str)
-    return df
+        data_list: List[list] = []
+        while rs.next():
+            data_list.append(rs.get_row_data())
+        if not data_list:
+            return pd.DataFrame()
+        df = pd.DataFrame(data_list, columns=rs.fields)
+        df["date"] = df["calendar_date"].astype(str)
+        return df
+    finally:
+        _bs_logout()
 
 
 def QA_fetch_get_stock_industry():
     """全市场行业分类(baostock query_stock_industry, 每周一更新)
 
-    注意: 数据量大, 单次查询约 30-60s(依赖服务器)。
+    注意: 数据量大, 单次查询约 30-80s(依赖服务器)。
     2026-09-02 起可用: 修复了 baostock 0.9.3 resultset.get_data 的
-    df.append 兼容问题(pandas 2.x 移除 df.append)。
+    df.append 兼容问题(pandas 2.x 移除 df.append), 需保留本机补丁:
+    site-packages/baostock/data/resultset.py (备份 .bak.20260902)
 
     :return: DataFrame(updateDate, code, code_name, industry, industryClassification)
     """
     _bs_login()
+    try:
+        rs = bs.query_stock_industry()
+        if rs.error_code != "0":
+            raise RuntimeError(f"baostock stock_industry error: {rs.error_msg}")
 
-    def _query():
-        return bs.query_stock_industry()
-
-    rs = _query()
-    if rs.error_code != "0":
-        _bs_reconnect()
-        rs = _query()
-    if rs.error_code != "0":
-        raise RuntimeError(f"baostock stock_industry error: {rs.error_msg}")
-
-    data_list: List[list] = []
-    while rs.next():
-        data_list.append(rs.get_row_data())
-    if not data_list:
-        return pd.DataFrame()
-    df = pd.DataFrame(data_list, columns=rs.fields)
-    df["code"] = df["code"].apply(lambda x: x.split(".")[-1])
-    return df
+        data_list: List[list] = []
+        while rs.next():
+            data_list.append(rs.get_row_data())
+        if not data_list:
+            return pd.DataFrame()
+        df = pd.DataFrame(data_list, columns=rs.fields)
+        df["code"] = df["code"].apply(lambda x: x.split(".")[-1])
+        return df
+    finally:
+        _bs_logout()
