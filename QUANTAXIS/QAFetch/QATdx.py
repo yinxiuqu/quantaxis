@@ -424,6 +424,8 @@ def QA_fetch_get_stock_day(code, start_date, end_date, if_fq='00',
             print('pip install pytdx')
         else:
             print(e)
+        # 2026-09-02: 必须重新抛出, @retry 才能捕获并重试 (否则吞异常返回 None, 重试永不触发)
+        raise
 
 
 @retry(stop_max_attempt_number=3, wait_random_min=50, wait_random_max=100)
