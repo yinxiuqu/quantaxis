@@ -32,6 +32,7 @@
 import datetime
 
 import os
+import re
 import pandas as pd
 from pytdx.exhq import TdxExHq_API
 from pytdx.hq import TdxHq_API
@@ -105,6 +106,46 @@ def ping(ip, port=7709, type_='stock'):
         return datetime.timedelta(9, 9, 0)
 
 
+# ============ IPv4 校验 + 备用域名机制 (2026-09-02 修复) ============
+_IPV4_RE = re.compile(r'^(\d{1,3}\.){3}\d{1,3}$')
+
+
+def _is_ipv4(ip):
+    """严格 IPv4 格式校验 (域名/非法值一律 False)"""
+    return isinstance(ip, str) and bool(_IPV4_RE.match(ip)) and all(
+        0 <= int(part) <= 255 for part in ip.split('.'))
+
+
+# 备用域名服务器: 主名单全部不可用时兜底 (用户提供, 只作应急, 不落 mongo default)
+BACKUP_STOCK_DOMAINS = [
+    'sztdx.gtjas.com', 'jstdx.gtjas.com', 'shtdx.gtjas.com',
+    'bjwttdx.gtjas.com', 'bfwttdx.gtjas.com', 'hbwttdx.gtjas.com',
+    'cdtdx.gtjas.com',
+]
+
+
+def get_backup_ip(_type='stock'):
+    """主名单全部 ping 超时时, 解析备用域名并测试, 返回第一个可用的 IP"""
+    import socket
+    port = 7709 if _type == 'stock' else 7727
+    domains = BACKUP_STOCK_DOMAINS if _type == 'stock' else []
+    for domain in domains:
+        try:
+            ips = sorted(set(x[4][0] for x in socket.getaddrinfo(domain, port)))
+        except Exception:
+            continue
+        for ip in ips:
+            if not _is_ipv4(ip):
+                continue
+            try:
+                if ping(ip, port, _type) < datetime.timedelta(0, 9, 0):
+                    print('USING BACKUP DOMAIN {} -> {}'.format(domain, ip))
+                    return {'ip': ip, 'port': port, 'name': 'backup-' + domain}
+            except Exception:
+                pass
+    return {'ip': None, 'port': None}
+
+
 def select_best_ip():
     QA_util_log_info('Selecting the Best Server IP of TDX')
 
@@ -128,9 +169,11 @@ def select_best_ip():
 
     ipdefault = eval(ipdefault) if isinstance(ipdefault, str) else ipdefault
     assert isinstance(ipdefault, dict)
-    if ipdefault['stock']['ip'] == None:
-
+    if not _is_ipv4(ipdefault['stock']['ip']):  # 域名/非法值一律重新选, 不落 default
         best_stock_ip = get_ip_list_by_ping(stock_ip_list)
+        if best_stock_ip['ip'] is None:
+            print('MAIN STOCK IP LIST ALL FAILED, TRYING BACKUP DOMAINS')
+            best_stock_ip = get_backup_ip('stock')
     else:
         if ping(ipdefault['stock']['ip'], ipdefault['stock']['port'],
                 'stock') < datetime.timedelta(0, 1):
@@ -139,7 +182,10 @@ def select_best_ip():
         else:
             print('DEFAULT STOCK IP is BAD, RETESTING')
             best_stock_ip = get_ip_list_by_ping(stock_ip_list)
-    if ipdefault['future']['ip'] == None:
+            if best_stock_ip['ip'] is None:
+                print('MAIN STOCK IP LIST ALL FAILED, TRYING BACKUP DOMAINS')
+                best_stock_ip = get_backup_ip('stock')
+    if not _is_ipv4(ipdefault['future']['ip']):
         best_future_ip = get_ip_list_by_ping(future_ip_list, _type='future')
     else:
         if ping(ipdefault['future']['ip'], ipdefault['future']['port'],
@@ -150,7 +196,12 @@ def select_best_ip():
             print('DEFAULT FUTURE IP {} is BAD, RETESTING'.format(ipdefault))
             best_future_ip = get_ip_list_by_ping(future_ip_list,
                                                  _type='future')
+    # 写回 default 前做 IPv4 校验, 域名永不落库
     ipbest = {'stock': best_stock_ip, 'future': best_future_ip}
+    if not _is_ipv4(ipbest['stock']['ip']):
+        ipbest['stock'] = {'ip': None, 'port': None}
+    if not _is_ipv4(ipbest['future']['ip']):
+        ipbest['future'] = {'ip': None, 'port': None}
     qasetting.set_config(
         section='IPLIST', option='default', default_value=ipbest)
 
@@ -182,7 +233,8 @@ def get_ip_list_by_multi_process_ping(ip_list=[], n=0, _type='stock',
         # read the data from cache
         print('loading ip list from {} cache.'.format(_type))
     else:
-        ips = [(x['ip'], x['port'], _type) for x in ip_list]
+        ips = [(x['ip'], x['port'], _type) for x in ip_list
+               if _is_ipv4(x.get('ip'))]  # 域名条目直接跳过
         ps = Parallelism()
         ps.run(ping, ips)
         data = list(ps.get_results())
