@@ -96,7 +96,13 @@ class QAFeatureAnalysis():
         feature.index = feature.index.tz_localize('UTC')
         feature = feature.reset_index().set_index(['date', 'code'])
 
-        panelprice = deepcopy(self.stock_data.closepanel)
+        # 2026-09-02 A股 T+1 合规: 用"次日开盘价"作为成交价,
+        # prices[t] = open[t+1], 使 forward_ret[t] = open[t+1+period]/open[t+1] - 1
+        # (因子日 T 生成 → T+1 开盘买入, 与 make_ret 的 next_open 口径一致;
+        #  原实现用收盘价面板=假设 T 日收盘即可成交, 对 T+1 市场会高估)
+        # 注意: 需要比收盘版多一天的行情缓冲; 面板最后一行 shift 后为 NaN,
+        # 因子最后一日的收益会被 alphalens 丢弃(占比极小, max_loss 内安全)
+        panelprice = deepcopy(self.stock_data.openpanel).shift(-1)
         panelprice.index = pd.to_datetime(panelprice.index).tz_localize('UTC')
         return get_clean_factor_and_forward_returns(feature,
                                                     panelprice,
