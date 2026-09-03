@@ -118,7 +118,7 @@ def _QA_data_stock_to_fq(bfq_data, xdxr_data, fqtype):
         # data = data.fillna(method='ffill')
 
         data['if_trade'] = data['if_trade'].fillna(0)
-        data = data.ffill()
+        data = data.ffill().infer_objects(copy=False)  # 2026-09-03: 消除 object 列 ffill 弃用警告
 
         data = pd.concat(
             [
@@ -145,6 +145,11 @@ def _QA_data_stock_to_fq(bfq_data, xdxr_data, fqtype):
             ],
             axis=1
         )
+    # 2026-09-03: 除权字段(object 列, 如新股记录全 NaN)先显式转数值,
+    # 再 fillna(0) —— fillna 时已是 float64, 不触发 object downcasting 弃用警告
+    for _c in ['fenhong', 'peigu', 'peigujia', 'songzhuangu']:
+        if _c in data.columns:
+            data[_c] = pd.to_numeric(data[_c], errors='coerce')
     data = data.fillna(0)
     data['preclose'] = (
         data['close'].shift(1) * 10 - data['fenhong'] +
