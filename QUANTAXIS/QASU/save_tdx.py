@@ -615,6 +615,48 @@ def QA_SU_save_stock_year(client=DATABASE, ui_log=None, ui_progress=None):
         QA_util_log_info(err, ui_log=ui_log)
 
 
+def _merge_xdxr_same_day(xdxr):
+    """合并同日多条 xdxr 记录为一条主记录(2026-09-02)
+
+    背景: 通达信新增类别(实测 category=15"小额股份上市", 未来可能有 16/17 等)
+    常与主事件同日出现(如 000410 2019-12-23 的 转配股上市9 + 小额股份上市15),
+    而 stock_xdxr 集合的 (code, date) 唯一索引只允许一天一条,
+    同日第二条会被拒(静默丢失)。
+
+    处理(通用规则, 不写死 15/16/17):
+      - 同一天多条时, 主记录优先取 category==1(除权除息, 含复权所需字段),
+        否则取组内第一条;
+      - 其余记录合并进主记录的 extra_categories 字段(类别列表),
+        信息保留但不再占独立行;
+      - 单日单条不受影响, 原样返回。
+
+    注意: 该合并只用于"落库", 不影响调用方持有的原始 xdxr(复权计算
+    _QA_data_stock_to_fq 仍用原始数据, 且只取 category==1, 与合并无关)。
+    """
+    if xdxr is None or len(xdxr) == 0:
+        return xdxr
+    if not xdxr.index.duplicated().any():
+        return xdxr  # 无同日多条, 原样返回
+    rows = []
+    for _, group in xdxr.groupby(level=0):
+        g = group.copy()
+        if len(g) <= 1:
+            rows.append(g)
+            continue
+        # 主记录位置: 优先 category==1(除权除息, 含复权所需字段), 否则组内第一条
+        if (g['category'] == 1).any():
+            pos = list(g.index).index(g[g['category'] == 1].index[0])
+        else:
+            pos = 0
+        main = g.iloc[[pos]].copy()
+        # 用位置取其余行(不能 drop(index), index 可能完全重复会误删)
+        extras = g.iloc[[i for i in range(len(g)) if i != pos]]
+        main['extra_categories'] = str(extras['category'].tolist())
+        rows.append(main)
+    return pd.concat(rows)
+
+
+
 def QA_SU_save_stock_xdxr(client=DATABASE, ui_log=None, ui_progress=None):
     """[summary]
 
@@ -671,9 +713,12 @@ def QA_SU_save_stock_xdxr(client=DATABASE, ui_log=None, ui_progress=None):
         try:
 
             xdxr  = QA_fetch_get_stock_xdxr(str(code))
+            # 2026-09-02: 同日多条(如 9+15)合并为一条主记录再落库,
+            # 避免 (code,date) 唯一索引拒掉同日第二条; 复权计算仍用原始 xdxr
+            xdxr_store = _merge_xdxr_same_day(xdxr)
             try:
                 coll.insert_many(
-                    QA_util_to_json_from_pandas(xdxr),
+                    QA_util_to_json_from_pandas(xdxr_store),
                     ordered=False
                 )
             except:

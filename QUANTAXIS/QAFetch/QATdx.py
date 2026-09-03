@@ -1338,14 +1338,18 @@ def QA_fetch_get_stock_xdxr(code, ip=None, port=None):
             '5': '股本变化',
             '6': '增发新股', '7': '股份回购', '8': '增发新股上市', '9': '转配股上市',
             '10': '可转债上市',
-            '11': '扩缩股', '12': '非流通股缩股', '13': '送认购权证', '14': '送认沽权证'}
+            '11': '扩缩股', '12': '非流通股缩股', '13': '送认购权证', '14': '送认沽权证',
+            # 2026-09-02: 通达信映射外新增类别(实测 000410/000157/600168 等含 15),
+            # 数据特征: 与转配/转增同日的小额流通股上市, 总股本不变,
+            # 不参与复权(复权只取 category==1)。官方名称待通达信确认。
+            '15': '小额股份上市'}
         data = api.to_df(api.get_xdxr_info(market_code, code))
         if len(data) >= 1:
             data = data \
                 .assign(date=pd.to_datetime(data[['year', 'month', 'day']], utc=False)) \
                 .drop(['year', 'month', 'day'], axis=1) \
                 .assign(category_meaning=data['category'].apply(
-                    lambda x: category[str(x)])) \
+                    lambda x: category.get(str(x), '未知类别%s' % x))) \
                 .assign(code=str(code)) \
                 .rename(index=str, columns={'panhouliutong': 'liquidity_after',
                                             'panqianliutong': 'liquidity_before',
