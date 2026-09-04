@@ -2031,13 +2031,6 @@ def QA_SU_save_stock_block(client=DATABASE, ui_log=None, ui_progress=None):
                 ui_log=ui_log
             )
 
-        QA_util_log_info(
-            '完成股票板块获取=',
-            ui_log=ui_log,
-            ui_progress=ui_progress,
-            ui_progress_int_value=10000
-        )
-
         # coll.insert_many(
         #     QA_util_to_json_from_pandas(QA_fetch_get_stock_block('QA'))
         # )
